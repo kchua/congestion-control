@@ -16,7 +16,7 @@ IS_ACK =   0x4
 IS_RESET = 0x8
 
 MAX_PACKET_SIZE = 10
-MAX_RETRANSMIT  = 10
+MAX_RETRANSMIT  = 50
 ALPHA = 0.9
 
 
@@ -79,7 +79,6 @@ class Client:
         return create_packet(self.our_seq, self.ack_seq + 1, "", 0, IS_ACK)
 
     def send_packet(self, packet):
-        logging.info('Sending packet.')
         self.sock.sendto(
             json.dumps(packet).encode(),
             self.server
@@ -157,8 +156,6 @@ class Client:
                     received = t.time()
                     decoded_msg = json.loads(msg.decode())
 
-                    logging.info('{}, {}'.format(msg, addr))
-
                     if decoded_msg['flags'] & IS_ACK:
                         new_buffer = []
                         ack_num = decoded_msg['acknum']
@@ -169,6 +166,7 @@ class Client:
                                 # Use to update Estimated RTT.
                                 sample_rtt = received - time
                                 self.estimated_rtt = self.estimated_rtt * ALPHA + sample_rtt * (1.0 - ALPHA)
+                                logging.debug('Updated RTT {}'.format(self.estimated_rtt))
                         self.send_buffer = new_buffer
                 except:
                     # No packet
@@ -179,15 +177,17 @@ class Client:
                     # TODO transmit a new packet.
                     # TODO this is where congestion control goes.
                     data = self.read_data(MAX_PACKET_SIZE)
-                    if data is None:
-                        logging.info('Finished transmitting all data.')
-                        self.state = CLOSED
-                        return
-                    packet = create_packet(self.our_seq + 1, self.ack_seq + 1, data, 0, IS_ACK)
-                    self.our_seq += len(data)
-                    self.send_packet(packet)
-                    self.time_since_transmit = t.time()
-                    self.send_buffer.append((t.time(), packet, False))
+                    if len(data) == 0:
+                        if len(self.send_buffer) == 0:
+                            logging.info('Finished transmitting all data.')
+                            self.state = CLOSED
+                            return
+                    else:
+                        packet = create_packet(self.our_seq + 1, self.ack_seq + 1, data, 0, IS_ACK)
+                        self.our_seq += len(data)
+                        self.send_packet(packet)
+                        self.time_since_transmit = t.time()
+                        self.send_buffer.append((t.time(), packet, False))
 
                 # Check if we should retransmit any existing packets.
                 current_time = t.time()
@@ -196,8 +196,10 @@ class Client:
                     if current_time - time > self.estimated_rtt * 2:
                         self.send_packet(packet)
                         new_buffer.append((current_time, packet, True))
+                        logging.debug('Retransmitting packet with data {}'.format(packet['data']))
                     else:
                         new_buffer.append((time, packet, retransmit))
+                self.send_buffer = new_buffer
 
             else:
                 logging.error('Incorrect TCP State.')
@@ -214,10 +216,8 @@ if __name__ == '__main__':
     lipsum = open('lipsum.txt', 'r')
     def read_data(num_chars):
         data = lipsum.read(num_chars)
-        if len(data) == 0:
-            lipsum.close()
-            return None
         return data
 
     client = Client((options.ip, options.port), read_data)
     client.run()
+    lipsum.close()

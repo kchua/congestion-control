@@ -14,7 +14,7 @@ IS_ACK =   0x4
 IS_RESET = 0x8
 
 MAX_PACKET_SIZE = 1500
-MAX_RETRANSMIT  = 10
+MAX_RETRANSMIT  = 50
 
 
 def create_packet(seqnum, acknum, data, rwnd, flags):
@@ -65,7 +65,6 @@ class Server:
         self.packet_buffer = []
 
     def send_packet(self, packet):
-        logging.info('Sending packet.')
         self.sock.sendto(
             json.dumps(packet).encode(),
             self.receiver

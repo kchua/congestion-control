@@ -31,7 +31,7 @@ def main():
     topo = Topo()
     topo.addHost('h1')
     topo.addHost('h2')
-    topo.addLink('h1','h2', bw=10, delay='5ms', loss=10)
+    topo.addLink('h1','h2', bw=10, delay='5ms', loss=50)
 
     # The TCLink is needed for use to set the bandwidth, delay and loss
     # constraints on the link
