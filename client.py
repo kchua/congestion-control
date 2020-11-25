@@ -62,6 +62,11 @@ class Client:
         self.ack_seq = -1  # The sequence number we have acknowledged.
         self.retransmit_count = 0  # Number of times has our last message been retransmitted.
 
+        # Send buffer
+        # Contains (time, packet, retransmitted) pairs. Retransmits will happen upon timeout.
+        # We can also use this to set estimated RTT, when retransmitted = False.
+        self.send_buffer = []
+
     def syn_packet(self):
         return create_packet(self.our_seq, 0, "", 0, IS_SYN)
 
