@@ -65,6 +65,7 @@ class Server:
         self.packet_buffer = []
 
     def send_packet(self, packet):
+        logging.info('Sending packet.')
         self.sock.sendto(
             json.dumps(packet).encode(),
             self.receiver
@@ -231,8 +232,12 @@ if __name__ == '__main__':
     parser.add_option('-p', dest='port', type='int', default=12345)
     (options, args) = parser.parse_args()
 
+    lipsum = open('lipsum_server.txt', 'w')
     def process_message(message):
         logging.info('Message received: {}'.format(message))
+        lipsum.write(message)
+        lipsum.flush()
 
     server = Server((options.ip, options.port), process_message)
     server.run()
+    lipsum.close()

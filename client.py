@@ -3,6 +3,7 @@ import json
 import optparse
 import select
 import random
+import time as t
 
 import logging
 logging.basicConfig(format='[%(asctime)s.%(msecs)03d] CLIENT - %(levelname)s: %(message)s',
@@ -14,8 +15,9 @@ IS_FIN =   0x2
 IS_ACK =   0x4
 IS_RESET = 0x8
 
-MAX_PACKET_SIZE = 1500
+MAX_PACKET_SIZE = 10
 MAX_RETRANSMIT  = 10
+ALPHA = 0.9
 
 
 def create_packet(seqnum, acknum, data, rwnd, flags):
@@ -43,7 +45,7 @@ ESTABLISHED = 5
 
 
 class Client:
-    def __init__(self, server):
+    def __init__(self, server, read_data):
         """
         Creates a client which will attempt to connect to
         the server determined by the (ip, port) tuple in the
@@ -55,6 +57,7 @@ class Client:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.poller = select.poll()
         self.poller.register(self.sock, ALL_FLAGS)
+        self.read_data = read_data
 
         # TCP State that will be updated throughout the run.
         self.state = CLOSED
@@ -66,6 +69,8 @@ class Client:
         # Contains (time, packet, retransmitted) pairs. Retransmits will happen upon timeout.
         # We can also use this to set estimated RTT, when retransmitted = False.
         self.send_buffer = []
+        self.estimated_rtt = 1.0  # in seconds
+        self.time_since_transmit = 0.0
 
     def syn_packet(self):
         return create_packet(self.our_seq, 0, "", 0, IS_SYN)
@@ -74,6 +79,7 @@ class Client:
         return create_packet(self.our_seq, self.ack_seq + 1, "", 0, IS_ACK)
 
     def send_packet(self, packet):
+        logging.info('Sending packet.')
         self.sock.sendto(
             json.dumps(packet).encode(),
             self.server
@@ -145,62 +151,59 @@ class Client:
             elif self.state == SYN_RCVD:
                 pass
             elif self.state == ESTABLISHED:
-                pass
+                # Check if we have any new ACKs
+                try:
+                    msg, addr = self.sock.recvfrom(1600)
+                    received = t.time()
+                    decoded_msg = json.loads(msg.decode())
+
+                    logging.info('{}, {}'.format(msg, addr))
+
+                    if decoded_msg['flags'] & IS_ACK:
+                        new_buffer = []
+                        ack_num = decoded_msg['acknum']
+                        for (time, packet, retransmit) in self.send_buffer:
+                            if packet['seqnum'] + len(packet['data']) - 1 >= ack_num:
+                                new_buffer.append((time, packet, retransmit))
+                            elif not retransmit:
+                                # Use to update Estimated RTT.
+                                sample_rtt = received - time
+                                self.estimated_rtt = self.estimated_rtt * ALPHA + sample_rtt * (1.0 - ALPHA)
+                        self.send_buffer = new_buffer
+                except:
+                    # No packet
+                    pass
+
+                # Check if we should transmit any new packets.
+                if t.time() - self.time_since_transmit > 0.1:
+                    # TODO transmit a new packet.
+                    # TODO this is where congestion control goes.
+                    data = self.read_data(MAX_PACKET_SIZE)
+                    if data is None:
+                        logging.info('Finished transmitting all data.')
+                        self.state = CLOSED
+                        return
+                    packet = create_packet(self.our_seq + 1, self.ack_seq + 1, data, 0, IS_ACK)
+                    self.our_seq += len(data)
+                    self.send_packet(packet)
+                    self.time_since_transmit = t.time()
+                    self.send_buffer.append((t.time(), packet, False))
+
+                # Check if we should retransmit any existing packets.
+                current_time = t.time()
+                new_buffer = []
+                for (time, packet, retransmit) in self.send_buffer:
+                    if current_time - time > self.estimated_rtt * 2:
+                        self.send_packet(packet)
+                        new_buffer.append((current_time, packet, True))
+                    else:
+                        new_buffer.append((time, packet, retransmit))
+
             else:
                 logging.error('Incorrect TCP State.')
                 self.state = CLOSED
                 return
 
-    def transmit_message(self, message):
-        if not self.is_connected:
-            logging.error('Cannot transmit packet without connection.')
-            return False
-
-        packet = json.dumps({
-            'SYN': self.seq_start + 1,
-            'DATA': message,
-        }).encode()
-
-        num_attempts = 0
-        while True:
-            self.sock.sendto(
-                packet,
-                self.server
-            )
-
-            # Wait for an acknowledgement
-            events = self.poller.poll(1000)
-            if not events:
-                num_attempts += 1
-                logging.warn('Packet {} dropped!'.format(self.seq_start + 1))
-                logging.warn('Retransmitting packet {}'.format(self.seq_start + 1))
-
-                if num_attempts > 10:
-                    logging.error("Exceeded 10 attempts. Giving up.")
-                    return False
-
-            for fd, flag in events:
-                assert self.sock.fileno() == fd
-
-                if flag & ERR_FLAGS:
-                    return
-                if flag & READ_FLAGS:
-                    msg, addr = self.sock.recvfrom(1600)
-                    decoded_msg = json.loads(msg.decode())
-                    if addr == self.server and decoded_msg["ACK"] == self.seq_start + 1:
-                        logging.info('Packet {} acknowledged.'.format(self.seq_start + 1))
-                        self.seq_start += 1
-                        return True
-
-        logging.error('Should not get here...')
-        return False
-
-    #def run(self):
-    #    for i in range(100):
-    #        result = self.transmit_message('hello there')
-    #        if not result:
-    #            logging.error('Error transmitting.')
-    #            return
 
 if __name__ == '__main__':
     parser = optparse.OptionParser()
@@ -208,10 +211,13 @@ if __name__ == '__main__':
     parser.add_option('-p', dest='port', type='int', default=12345)
     (options, args) = parser.parse_args()
 
-    client = Client((options.ip, options.port))
-    #client.connect()
-    client.run()
+    lipsum = open('lipsum.txt', 'r')
+    def read_data(num_chars):
+        data = lipsum.read(num_chars)
+        if len(data) == 0:
+            lipsum.close()
+            return None
+        return data
 
-# s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-# s.sendto(options.msg, (options.ip, options.port))
-# s.sendto(options.msg, (options.ip, options.port))
+    client = Client((options.ip, options.port), read_data)
+    client.run()
