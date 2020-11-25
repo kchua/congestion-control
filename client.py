@@ -7,7 +7,7 @@ import time as t
 
 import logging
 logging.basicConfig(format='[%(asctime)s.%(msecs)03d] CLIENT - %(levelname)s: %(message)s',
-                    datefmt='%H:%M:%S', filename='network.log', level=logging.INFO)
+                    datefmt='%H:%M:%S', filename='network.log', level=logging.DEBUG)
 
 
 IS_SYN =   0x1
@@ -174,7 +174,6 @@ class Client:
 
                 # Check if we should transmit any new packets.
                 if t.time() - self.time_since_transmit > 0.1:
-                    # TODO transmit a new packet.
                     # TODO this is where congestion control goes.
                     data = self.read_data(MAX_PACKET_SIZE)
                     if len(data) == 0:
