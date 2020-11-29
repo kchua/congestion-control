@@ -146,7 +146,6 @@ class Server:
                         if (decoded_msg['flags'] & IS_ACK):
                             if decoded_msg['acknum'] == self.our_seq + 1:
                                 ack_received = True
-                                self.ack_seq = decoded_msg['seqnum']
                                 self.retransmit_count = 0
                                 logging.info('Received ACK for Server Seq {}'.format(self.our_seq))
 
