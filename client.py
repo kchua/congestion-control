@@ -4,6 +4,7 @@ import optparse
 import select
 import random
 import time as t
+import heapq
 
 import logging
 logging.basicConfig(format='[%(asctime)s.%(msecs)03d] CLIENT - %(levelname)s: %(message)s',
@@ -66,9 +67,10 @@ class Client:
         self.retransmit_count = 0  # Number of times has our last message been retransmitted.
 
         # Send buffer
-        # Contains (time, packet, retransmitted) pairs. Retransmits will happen upon timeout.
+        # Contains {timestamp, packet, retransmitted, ACKed}. Retransmits will happen upon timeout.
         # We can also use this to set estimated RTT, when retransmitted = False.
-        self.send_buffer = []
+        self.packets_in_flight = []
+        self.retransmit_queue = []
         self.estimated_rtt = 1.0  # in seconds
         self.time_since_transmit = 0.0
 
@@ -157,17 +159,21 @@ class Client:
                     decoded_msg = json.loads(msg.decode())
 
                     if decoded_msg['flags'] & IS_ACK:
-                        new_buffer = []
                         ack_num = decoded_msg['acknum']
-                        for (time, packet, retransmit) in self.send_buffer:
-                            if packet['seqnum'] + len(packet['data']) - 1 >= ack_num:
-                                new_buffer.append((time, packet, retransmit))
-                            elif not retransmit:
-                                # Use to update Estimated RTT.
-                                sample_rtt = received - time
-                                self.estimated_rtt = self.estimated_rtt * ALPHA + sample_rtt * (1.0 - ALPHA)
-                                logging.debug('Updated RTT {}'.format(self.estimated_rtt))
-                        self.send_buffer = new_buffer
+
+                        while len(self.packets_in_flight) > 0:
+                            packet_least_seqnum = self.packets_in_flight[0][1]['packet']
+                            if packet_least_seqnum['seqnum'] + len(packet_least_seqnum['data']) - 1 < ack_num:
+                                acked_infodict = heapq.heappop(self.packets_in_flight)[1]
+                                if not acked_infodict['retransmitted']:
+                                    # Use to update Estimated RTT.
+                                    sample_rtt = received - acked_infodict['timestamp']
+                                    self.estimated_rtt = self.estimated_rtt * ALPHA + sample_rtt * (1.0 - ALPHA)
+                                    logging.debug('Updated RTT {}'.format(self.estimated_rtt))
+                                del acked_infodict['packet']        # Free memory associated with packet, since already ACKed
+                                acked_infodict['ACKed'] = True
+                            else:
+                                break
                 except:
                     # No packet
                     pass
@@ -177,7 +183,7 @@ class Client:
                     # TODO this is where congestion control goes.
                     data = self.read_data(MAX_PACKET_SIZE)
                     if len(data) == 0:
-                        if len(self.send_buffer) == 0:
+                        if len(self.packets_in_flight) == 0:
                             logging.info('Finished transmitting all data.')
                             self.state = CLOSED
                             return
@@ -186,20 +192,28 @@ class Client:
                         self.our_seq += len(data)
                         self.send_packet(packet)
                         self.time_since_transmit = t.time()
-                        self.send_buffer.append((t.time(), packet, False))
+                        infodict = {
+                            'timestamp': self.time_since_transmit,
+                            'packet': packet,
+                            'retransmitted': False,
+                            'ACKed': False
+                        }
+                        heapq.heappush(self.packets_in_flight, (packet['seqnum'], infodict))
+                        heapq.heappush(self.retransmit_queue, (infodict['timestamp'], infodict))
 
                 # Check if we should retransmit any existing packets.
-                current_time = t.time()
-                new_buffer = []
-                for (time, packet, retransmit) in self.send_buffer:
-                    if current_time - time > self.estimated_rtt * 2:
-                        self.send_packet(packet)
-                        new_buffer.append((current_time, packet, True))
-                        logging.debug('Retransmitting packet with data {}'.format(packet['data']))
+                while len(self.retransmit_queue) > 0:
+                    if t.time() - self.retransmit_queue[0][0] > self.estimated_rtt * 2:
+                        if self.retransmit_queue[0][1]['ACKed']:
+                            heapq.heappop(self.retransmit_queue)
+                        else:
+                            to_retransmit_infodict = heapq.heappop(self.retransmit_queue)[1]
+                            self.send_packet(to_retransmit_infodict['packet'])
+                            to_retransmit_infodict['retransmitted'] = True
+                            heapq.heappush(self.retransmit_queue, (t.time(), to_retransmit_infodict))
+                            logging.debug('Retransmitting packet with data {}'.format(to_retransmit_infodict['packet']['data']))
                     else:
-                        new_buffer.append((time, packet, retransmit))
-                self.send_buffer = new_buffer
-
+                        break
             else:
                 logging.error('Incorrect TCP State.')
                 self.state = CLOSED

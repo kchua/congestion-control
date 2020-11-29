@@ -4,6 +4,7 @@ import socket
 import optparse
 import select
 import logging
+import heapq
 logging.basicConfig(format='[%(asctime)s.%(msecs)03d] SERVER - %(levelname)s: %(message)s',
                     datefmt='%H:%M:%S', filename='network.log', level=logging.INFO)
 
@@ -71,23 +72,19 @@ class Server:
         )
 
     def process_data_packet(self, p):
-        self.packet_buffer.append(p)
+        if Server._end_seqnum(p) >= self.ack_seq + 1:
+            heapq.heappush(self.packet_buffer, (p['seqnum'], p))
 
-        # Check if any packets in the buffer can be delivered.
-        # To do so, sort by sequence number and see if they can be delivered in order.
-        self.packet_buffer.sort(key=lambda x: x['seqnum'])
-        new_packet_buffer = []
-        for packet in self.packet_buffer:
-            if packet['seqnum'] + len(packet['data']) - 1 >= self.ack_seq + 1:
-                # Check if packet should be buffered or processed immediately.
-                if packet['seqnum'] <= self.ack_seq + 1:
+            while len(self.packet_buffer) > 0:
+                if Server._end_seqnum(self.packet_buffer[0][1]) < self.ack_seq + 1:
+                    heapq.heappop(self.packet_buffer)   # Duplicate packet
+                elif self.packet_buffer[0][1]['seqnum'] <= self.ack_seq + 1:
+                    packet = heapq.heappop(self.packet_buffer)[1]
                     difference = self.ack_seq + 1 - packet['seqnum']
                     self.process_message(packet['data'][difference:])
-                    self.ack_seq += len(packet['data'][difference:])
+                    self.ack_seq = Server._end_seqnum(packet)
                 else:
-                    new_packet_buffer.append(packet)
-
-        self.packet_buffer = new_packet_buffer
+                    break
 
     def syn_packet(self):
         return create_packet(self.our_seq, 0, "", 0, IS_SYN)
@@ -215,6 +212,10 @@ class Server:
                 logging.error('Incorrect TCP State.')
                 self.state = CLOSED
                 return
+
+    @staticmethod
+    def _end_seqnum(packet):
+        return packet['seqnum'] + len(packet['data']) - 1
 
 def test_process_data_packet(server):
     alpha = 'abcdefghijklmnopqrstuvwxyz'
