@@ -9,23 +9,29 @@ logging.basicConfig(format='[%(asctime)s.%(msecs)03d] SERVER - %(levelname)s: %(
                     datefmt='%H:%M:%S', filename='network.log', level=logging.INFO)
 
 
-IS_SYN =   0x1
-IS_FIN =   0x2
-IS_ACK =   0x4
-IS_RESET = 0x8
+IS_SYN         = 0x1
+IS_FIN         = 0x2
+IS_ACK         = 0x4
+IS_RESET       = 0x8
+SACK_PERMITTED = 0x10
+IS_SACK        = 0x20
 
 MAX_PACKET_SIZE = 1500
 MAX_RETRANSMIT  = 50
 
 
-def create_packet(seqnum, acknum, data, rwnd, flags):
-    return {
+def create_packet(seqnum, acknum, data, rwnd, flags, sack_left=None, sack_right=None):
+    packet = {
         'seqnum': seqnum,
         'acknum': acknum,
         'data':   data,
         'rwnd':   rwnd,
         'flags':  flags,
     }
+    if sack_left is not None and sack_right is not None:
+        packet['sack_left'] = sack_left
+        packet['sack_right'] = sack_right
+    return packet
 
 
 READ_FLAGS = select.POLLIN | select.POLLPRI
@@ -61,6 +67,7 @@ class Server:
         self.our_seq = random.randrange(1024)  # The current sequence number on our side.
         self.ack_seq = -1  # The sequence number we have acknowledged.
         self.retransmit_count = 0  # Number of times has our last message been retransmitted.
+        self.send_sacks = False
 
         # Received data, possibly out of order.
         self.packet_buffer = []
@@ -92,6 +99,9 @@ class Server:
     def ack_packet(self):
         return create_packet(self.our_seq, self.ack_seq + 1, "", 0, IS_ACK)
 
+    def sack_packet(self, sack_left, sack_right):
+        return create_packet(self.our_seq, self.ack_seq + 1, "", 0, IS_ACK | IS_SACK, sack_left=sack_left, sack_right=sack_right)
+
     def syn_ack_packet(self):
         return create_packet(self.our_seq, self.ack_seq + 1, "", 0, IS_ACK | IS_SYN)
 
@@ -108,6 +118,9 @@ class Server:
                 if decoded_msg['flags'] & IS_SYN:
                     self.receiver = addr
                     self.ack_seq = decoded_msg['seqnum']
+                    if decoded_msg['flags'] & SACK_PERMITTED:
+                        self.send_sacks = True
+                        logging.info("Selective ACKs are enabled.")
                     logging.info("Made first contact with %s. Sending response..." % str(addr))
 
                     self.sock.setblocking(0)
@@ -118,7 +131,7 @@ class Server:
                     self.state = SYN_RCVD
 
             elif self.state == SYN_SENT:
-                pass 
+                pass
             elif self.state == SYN_RCVD:
                 events = self.poller.poll(1000)  # Poll for one second
 
@@ -152,8 +165,12 @@ class Server:
                                 # Check if there is data in the ACK.
                                 if len(decoded_msg['data']) > 0:
                                     self.process_data_packet(decoded_msg)
-                                    self.send_packet(self.ack_packet())
-
+                                    if self.send_sacks:
+                                        self.send_packet(self.sack_packet(
+                                            decoded_msg['seqnum'], decoded_msg['seqnum'] + len(decoded_msg['data'])
+                                        ))
+                                    else:
+                                        self.send_packet(self.ack_packet())
 
                 # If events is empty, retransmit or fail.
                 if not events or not ack_received:
@@ -192,7 +209,12 @@ class Server:
                         self.retransmit_count = 0
                         if len(decoded_msg['data']) > 0:
                             self.process_data_packet(decoded_msg)
-                            self.send_packet(self.ack_packet())
+                            if self.send_sacks:
+                                self.send_packet(self.sack_packet(
+                                    decoded_msg['seqnum'], decoded_msg['seqnum'] + len(decoded_msg['data'])
+                                ))
+                            else:
+                                self.send_packet(self.ack_packet())
                             packet_received = True
 
 
