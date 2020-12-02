@@ -203,10 +203,6 @@ class Client:
 
                 # Check if we should retransmit any existing packets.
                 while len(self.retransmit_queue) > 0:
-<<<<<<< HEAD
-=======
-                    if t.time() - self.retransmit_queue[0][0] > self.estimated_rtt * 2:
->>>>>>> 3184910970b267c8848987fb02ecfe76db643fff
                     if t.time() > self.retransmit_queue[0][0]:
                         if self.retransmit_queue[0][1]['ACKed']:
                             heapq.heappop(self.retransmit_queue)
