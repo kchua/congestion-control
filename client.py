@@ -203,14 +203,14 @@ class Client:
 
                 # Check if we should retransmit any existing packets.
                 while len(self.retransmit_queue) > 0:
-                    if t.time() - self.retransmit_queue[0][0] > self.estimated_rtt * 2:
+                    if t.time() > self.retransmit_queue[0][0]:
                         if self.retransmit_queue[0][1]['ACKed']:
                             heapq.heappop(self.retransmit_queue)
                         else:
                             to_retransmit_infodict = heapq.heappop(self.retransmit_queue)[1]
                             self.send_packet(to_retransmit_infodict['packet'])
                             to_retransmit_infodict['retransmitted'] = True
-                            heapq.heappush(self.retransmit_queue, (t.time(), to_retransmit_infodict))
+                            heapq.heappush(self.retransmit_queue, (t.time() + 2 * self.estimated_rtt, to_retransmit_infodict))
                             logging.debug('Retransmitting packet with data {}'.format(to_retransmit_infodict['packet']['data']))
                     else:
                         break
