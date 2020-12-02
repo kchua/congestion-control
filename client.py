@@ -147,7 +147,7 @@ class Client:
                     # Do the retransmission.
                     self.send_packet(self.syn_packet())
                     logging.warn("Retrying SYN packet.")
- 
+
 
             elif self.state == SYN_RCVD:
                 pass
@@ -199,7 +199,7 @@ class Client:
                             'ACKed': False
                         }
                         heapq.heappush(self.packets_in_flight, (packet['seqnum'], infodict))
-                        heapq.heappush(self.retransmit_queue, (infodict['timestamp'], infodict))
+                        heapq.heappush(self.retransmit_queue, (infodict['timestamp'] + 2 * self.estimated_rtt, infodict))
 
                 # Check if we should retransmit any existing packets.
                 while len(self.retransmit_queue) > 0:
