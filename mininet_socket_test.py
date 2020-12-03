@@ -31,7 +31,7 @@ def main():
     topo = Topo()
     topo.addHost('h1')
     topo.addHost('h2')
-    topo.addLink('h1','h2', bw=10, delay='5ms', loss=50)
+    topo.addLink('h1','h2', bw=10, delay='5ms', loss=5)
 
     # The TCLink is needed for use to set the bandwidth, delay and loss
     # constraints on the link
@@ -48,7 +48,7 @@ def main():
 
     h2 = net.get('h2')
     client_log = open("client.log", "w")
-    p2 = h2.popen('python client.py -i %s' % h1.IP(), stdout=client_log, stderr=client_log)
+    p2 = h2.popen('python vivace.py -i %s' % h1.IP(), stdout=client_log, stderr=client_log)
 
     CLI(net)
     p1.terminate()
