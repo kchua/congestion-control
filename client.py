@@ -8,7 +8,7 @@ import heapq
 
 import logging
 logging.basicConfig(format='[%(asctime)s.%(msecs)03d] CLIENT - %(levelname)s: %(message)s',
-                    datefmt='%H:%M:%S', filename='network.log', level=logging.DEBUG)
+                    datefmt='%H:%M:%S', filename='network.log', level=logging.WARNING)
 
 
 IS_SYN =   0x1
@@ -16,8 +16,9 @@ IS_FIN =   0x2
 IS_ACK =   0x4
 IS_RESET = 0x8
 
-MAX_PACKET_SIZE = 10
-MAX_RETRANSMIT  = 50
+MAX_PACKET_SIZE = 1500
+MAX_DATA_SIZE = 1400
+MAX_RETRANSMIT  = 10
 ALPHA = 0.9
 
 
@@ -31,11 +32,14 @@ def create_packet(seqnum, acknum, data, rwnd, flags):
     }
 
 
+
+
 READ_FLAGS = select.POLLIN | select.POLLPRI
 WRITE_FLAGS = select.POLLOUT
 ERR_FLAGS = select.POLLERR | select.POLLHUP | select.POLLNVAL
 READ_ERR_FLAGS = READ_FLAGS | ERR_FLAGS
 ALL_FLAGS = READ_FLAGS | WRITE_FLAGS | ERR_FLAGS
+
 
 # State flags
 CLOSED = 1
@@ -74,18 +78,34 @@ class Client:
         self.estimated_rtt = 1.0  # in seconds
         self.time_since_transmit = 0.0
 
+        self.num_bytes_since_measuring = 0
+        self.num_packets_since_measuring = 0
+        self.last_time_measured = t.time()
+        self.measure_intervals = 1.0
+
     def syn_packet(self):
         return create_packet(self.our_seq, 0, "", 0, IS_SYN)
 
     def ack_packet(self):
         return create_packet(self.our_seq, self.ack_seq + 1, "", 0, IS_ACK)
 
-    def send_packet(self, packet):
-        self.sock.sendto(
-            json.dumps(packet).encode(),
-            self.server
-        )
+    def compute_measurements(self):
+        logging.warn('Estimated RTT is: {}'.format(self.estimated_rtt))
+        self.last_time_measured = t.time()
+        self.num_bytes_since_measuring = 0
+        self.num_packets_since_measuring = 0
 
+    def send_packet(self, packet):
+        data = json.dumps(packet).encode()
+        logging.info('Sending packet with data size: {}'.format(len(data)))
+        logging.info('Max data size: {}'.format(MAX_DATA_SIZE))
+        try:
+            self.sock.sendto(
+                data,
+                self.server
+            )
+        except:
+            logging.error('Unable to send packet.')
 
     def run(self):
         while True:
@@ -152,6 +172,10 @@ class Client:
             elif self.state == SYN_RCVD:
                 pass
             elif self.state == ESTABLISHED:
+                current_time = t.time()
+                if current_time > self.last_time_measured + self.measure_intervals:
+                    self.compute_measurements()
+
                 # Check if we have any new ACKs
                 try:
                     msg, addr = self.sock.recvfrom(1600)
@@ -169,7 +193,7 @@ class Client:
                                     # Use to update Estimated RTT.
                                     sample_rtt = received - acked_infodict['timestamp']
                                     self.estimated_rtt = self.estimated_rtt * ALPHA + sample_rtt * (1.0 - ALPHA)
-                                    logging.debug('Updated RTT {}'.format(self.estimated_rtt))
+                                    logging.info('Updated RTT {}'.format(self.estimated_rtt))
                                 del acked_infodict['packet']        # Free memory associated with packet, since already ACKed
                                 acked_infodict['ACKed'] = True
                             else:
@@ -181,7 +205,7 @@ class Client:
                 # Check if we should transmit any new packets.
                 if t.time() - self.time_since_transmit > 0.1:
                     # TODO this is where congestion control goes.
-                    data = self.read_data(MAX_PACKET_SIZE)
+                    data = self.read_data(MAX_DATA_SIZE)
                     if len(data) == 0:
                         if len(self.packets_in_flight) == 0:
                             logging.info('Finished transmitting all data.')
@@ -211,7 +235,7 @@ class Client:
                             self.send_packet(to_retransmit_infodict['packet'])
                             to_retransmit_infodict['retransmitted'] = True
                             heapq.heappush(self.retransmit_queue, (t.time() + 2 * self.estimated_rtt, to_retransmit_infodict))
-                            logging.debug('Retransmitting packet with data {}'.format(to_retransmit_infodict['packet']['data']))
+                            logging.warn('Retransmitting packet with seqnum {}'.format(to_retransmit_infodict['packet']['seqnum']))
                     else:
                         break
             else:
@@ -231,6 +255,9 @@ if __name__ == '__main__':
         data = lipsum.read(num_chars)
         return data
 
-    client = Client((options.ip, options.port), read_data)
+    def read_garbage_data(num_chars):
+        return ' ' * num_chars
+
+    client = Client((options.ip, options.port), read_garbage_data)
     client.run()
     lipsum.close()

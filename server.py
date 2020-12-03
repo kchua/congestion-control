@@ -5,8 +5,10 @@ import optparse
 import select
 import logging
 import heapq
+
+import time as t
 logging.basicConfig(format='[%(asctime)s.%(msecs)03d] SERVER - %(levelname)s: %(message)s',
-                    datefmt='%H:%M:%S', filename='network.log', level=logging.INFO)
+                    datefmt='%H:%M:%S', filename='network.log', level=logging.WARNING)
 
 
 IS_SYN         = 0x1
@@ -17,7 +19,8 @@ SACK_PERMITTED = 0x10
 IS_SACK        = 0x20
 
 MAX_PACKET_SIZE = 1500
-MAX_RETRANSMIT  = 50
+MAX_RETRANSMIT  = 10
+HEADER_OVERHEAD = 28
 
 
 def create_packet(seqnum, acknum, data, rwnd, flags, sack_left=None, sack_right=None):
@@ -72,11 +75,21 @@ class Server:
         # Received data, possibly out of order.
         self.packet_buffer = []
 
+        self.num_bytes_since_measuring = 0
+        self.num_packets_since_measuring = 0
+        self.last_time_measured = t.time()
+        self.measure_intervals = 1.0
+
     def send_packet(self, packet):
-        self.sock.sendto(
-            json.dumps(packet).encode(),
-            self.receiver
-        )
+        data = json.dumps(packet).encode()
+        logging.info('Sending packet with data size: {}'.format(len(data)))
+        try:
+            self.sock.sendto(
+                data,
+                self.receiver
+            )
+        except:
+            logging.error('Unable to send packet.')
 
     def process_data_packet(self, p):
         if Server._end_seqnum(p) >= self.ack_seq + 1:
@@ -104,6 +117,14 @@ class Server:
 
     def syn_ack_packet(self):
         return create_packet(self.our_seq, self.ack_seq + 1, "", 0, IS_ACK | IS_SYN)
+
+    def compute_measurements(self):
+        throughput = self.num_bytes_since_measuring / self.measure_intervals
+        logging.warning('Total throughput in last {} seconds: {} Bytes / Second'.format(self.measure_intervals, throughput))
+        logging.warning('Total packets in last {} seconds: {}'.format(self.measure_intervals, self.num_packets_since_measuring))
+        self.last_time_measured = t.time()
+        self.num_bytes_since_measuring = 0
+        self.num_packets_since_measuring = 0
 
     def run(self):
         """
@@ -142,10 +163,7 @@ class Server:
 
                     if flag & ERR_FLAGS:
                         logging.error('Error flags set.')
-                        self.state = CLOSED
-                        self.retransmit_count = 0
-                        return
-                    if flag & READ_FLAGS:
+                    elif flag & READ_FLAGS:
                         msg, addr = self.sock.recvfrom(1600)
                         decoded_msg = json.loads(msg.decode())
 
@@ -186,6 +204,10 @@ class Server:
                     logging.warn("Retrying SYN-ACK packet.")
 
             elif self.state == ESTABLISHED:
+                current_time = t.time()
+                if current_time > self.last_time_measured + self.measure_intervals:
+                    self.compute_measurements()
+
                 events = self.poller.poll(1000)  # Poll for one second
 
                 packet_received = False
@@ -200,6 +222,9 @@ class Server:
                         return
                     if flag & READ_FLAGS:
                         msg, addr = self.sock.recvfrom(1600)
+                        self.num_bytes_since_measuring += len(msg)
+                        self.num_bytes_since_measuring += HEADER_OVERHEAD
+                        self.num_packets_since_measuring += 1
                         decoded_msg = json.loads(msg.decode())
 
                         if addr != self.receiver:
@@ -257,8 +282,10 @@ if __name__ == '__main__':
     def process_message(message):
         logging.info('Message received: {}'.format(message))
         lipsum.write(message)
-        lipsum.flush()
 
-    server = Server((options.ip, options.port), process_message)
+    def process_garbage_message(message):
+        logging.info('Message received with size {}'.format(len(message)))
+
+    server = Server((options.ip, options.port), process_garbage_message)
     server.run()
     lipsum.close()
