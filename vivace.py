@@ -19,7 +19,7 @@ IS_RESET       = 0x8
 SACK_PERMITTED = 0x10
 IS_SACK        = 0x20
 
-MAX_PACKET_SIZE = 10
+MAX_DATA_SIZE = 1400
 MAX_RETRANSMIT  = 50
 ALPHA = 0.9
 
@@ -94,11 +94,11 @@ class Client:
         # We can also use this to set estimated RTT, when retransmitted = False.
         self.packets_in_flight = []
         self.in_flight_dict = {}
-        self.retransmit_queue = []
         self.has_estimated_rtt = False
         self.estimated_rtt = 1.0  # in seconds
         self.rto = np.inf
         self.time_since_transmit = 0.0
+        self.time_to_retransmit = np.inf
 
         self.vivace_state = WAITING_FIRST_SRTT
         self.vivace_cur_start_MI = None
@@ -132,7 +132,6 @@ class Client:
             self.cur_rate = 10.0 / self.estimated_rtt
             logging.debug("Estimated RTT for the first time. Set sending rate to {}".format(self.cur_rate))
         self.rto = 4 * self.estimated_rtt
-        # logging.debug('Updated RTT {}'.format(self.estimated_rtt))
 
     @property
     def cur_MI(self):
@@ -177,7 +176,7 @@ class Client:
                 times = times[np.logical_not(lost_packets)]
 
                 loss_rate = float(len(acks) - np.count_nonzero(acks)) / float(len(acks))
-                if len(srtts) > 2:
+                if len(srtts) >= 2:
                     mean_srtt, mean_time = np.mean(srtts), np.mean(times)
                     srtt_devs, time_devs = srtts - mean_srtt, times - mean_time
                     weights = time_devs / np.sum(time_devs ** 2)
@@ -284,12 +283,13 @@ class Client:
 
                                 infodict['ACKed'] = True
                                 del self.in_flight_dict[sack_left]
-                                # if not infodict['retransmitted']:
-                                self.update_rtt(received - infodict['timestamp'])
+                                if not infodict['retransmitted']:
+                                    self.update_rtt(received - infodict['timestamp'])
                                 sacked_infodict = infodict
 
                         if decoded_msg['flags'] & IS_ACK:
                             ack_num = decoded_msg['acknum']
+                            new_ack = True
 
                             while len(self.packets_in_flight) > 0:
                                 if self.packets_in_flight[0][1]['ACKed']:
@@ -299,12 +299,15 @@ class Client:
 
                                     infodict['ACKed'] = True
                                     del self.in_flight_dict[infodict['packet']['seqnum']]
-                                    # Do not use an ACK to update RTT - should have received a SACK.
 
                                     # Do stuff with monitoring
                                     self.on_ack(infodict, received)
                                 else:
+                                    new_ack = False
                                     break
+
+                            if new_ack:
+                                self.time_to_retransmit = t.time() + self.rto
 
                         if sacked_infodict is not None:
                             self.on_ack(sacked_infodict, received, is_SACK=True)
@@ -318,21 +321,23 @@ class Client:
                 if t.time() - self.time_since_transmit > 1.0 / self.cur_rate:
                     # Check if there are outstanding unACKed packets to retransmit.
                     infodict = None
-                    while len(self.retransmit_queue) > 0 and t.time() > self.retransmit_queue[0][0] + self.rto:
-                        if self.retransmit_queue[0][1]['ACKed']:
-                            heapq.heappop(self.retransmit_queue)
-                        else:
-                            infodict = heapq.heappop(self.retransmit_queue)[1]
+
+                    if len(self.packets_in_flight) > 0:
+                        if t.time() > self.time_to_retransmit:
+                            infodict = self.packets_in_flight[0][1]
                             infodict['retransmitted'] = True
-                            logging.debug('Retransmitting packet with data {}'.format(
-                                infodict['packet']['data'])
+                            self.rto *= 2.0
+                            self.time_to_retransmit = np.inf
+                            logging.debug('Retransmitting packet with sequence number {}'.format(
+                                infodict['packet']['seqnum'])
                             )
-                            self.rto *= 2
-                            break
+                            logging.debug('Current RTO value: {}'.format(self.rto))
+                    else:
+                        self.time_to_retransmit = np.inf
 
                     # No packets to retransmit this time, send a new one if possible.
                     if infodict is None:
-                        data = self.read_data(MAX_PACKET_SIZE)
+                        data = self.read_data(MAX_DATA_SIZE)
                         if len(data) > 0:
                             packet = create_packet(self.our_seq + 1, self.ack_seq + 1, data, 0, IS_ACK)
                             self.our_seq += len(data)
@@ -354,8 +359,9 @@ class Client:
                         self.send_packet(infodict['packet'])
                         self.time_since_transmit = t.time()
                         infodict['timestamp'] = self.time_since_transmit
-                        heapq.heappush(self.retransmit_queue, (self.time_since_transmit, infodict))
                         self.on_send(infodict, self.time_since_transmit)
+                        if np.isinf(self.time_to_retransmit):
+                            self.time_to_retransmit = t.time() + self.rto
 
             else:
                 logging.error('Incorrect TCP State.')
@@ -437,6 +443,7 @@ class Client:
                 logging.debug("MI #{}".format(self.cur_MI['idx']))
                 logging.debug("Sending rate: {}".format(self.cur_MI['rate']))
                 logging.debug("Current RTT estimate: {}s.".format(self.cur_MI['rtt']))
+                logging.debug("Current RTO: {}s.".format(self.cur_MI['rtt']))
 
                 if self.vivace_state != SLOW_START:
                     logging.debug("")
@@ -470,6 +477,9 @@ if __name__ == '__main__':
     def read_data(num_chars):
         data = lipsum.read(num_chars)
         return data
+
+    def read_garbage_data(num_chars):
+        return ' ' * num_chars
 
     client = Client((options.ip, options.port), read_data)
     client.run()
