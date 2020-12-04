@@ -97,6 +97,7 @@ class Client:
         self.retransmit_queue = []
         self.has_estimated_rtt = False
         self.estimated_rtt = 1.0  # in seconds
+        self.rto = np.inf
         self.time_since_transmit = 0.0
 
         self.vivace_state = WAITING_FIRST_SRTT
@@ -130,6 +131,7 @@ class Client:
             self.has_estimated_rtt = True
             self.cur_rate = 10.0 / self.estimated_rtt
             logging.debug("Estimated RTT for the first time. Set sending rate to {}".format(self.cur_rate))
+        self.rto = 4 * self.estimated_rtt
         # logging.debug('Updated RTT {}'.format(self.estimated_rtt))
 
     @property
@@ -282,8 +284,8 @@ class Client:
 
                                 infodict['ACKed'] = True
                                 del self.in_flight_dict[sack_left]
-                                if not infodict['retransmitted']:
-                                    self.update_rtt(received - infodict['timestamp'])
+                                # if not infodict['retransmitted']:
+                                self.update_rtt(received - infodict['timestamp'])
                                 sacked_infodict = infodict
 
                         if decoded_msg['flags'] & IS_ACK:
@@ -316,7 +318,7 @@ class Client:
                 if t.time() - self.time_since_transmit > 1.0 / self.cur_rate:
                     # Check if there are outstanding unACKed packets to retransmit.
                     infodict = None
-                    while len(self.retransmit_queue) > 0 and t.time() > self.retransmit_queue[0][0]:
+                    while len(self.retransmit_queue) > 0 and t.time() > self.retransmit_queue[0][0] + self.rto:
                         if self.retransmit_queue[0][1]['ACKed']:
                             heapq.heappop(self.retransmit_queue)
                         else:
@@ -325,6 +327,7 @@ class Client:
                             logging.debug('Retransmitting packet with data {}'.format(
                                 infodict['packet']['data'])
                             )
+                            self.rto *= 2
                             break
 
                     # No packets to retransmit this time, send a new one if possible.
@@ -351,7 +354,7 @@ class Client:
                         self.send_packet(infodict['packet'])
                         self.time_since_transmit = t.time()
                         infodict['timestamp'] = self.time_since_transmit
-                        heapq.heappush(self.retransmit_queue, (self.time_since_transmit + 4 * self.estimated_rtt, infodict))
+                        heapq.heappush(self.retransmit_queue, (self.time_since_transmit, infodict))
                         self.on_send(infodict, self.time_since_transmit)
 
             else:
