@@ -1,3 +1,5 @@
+from __future__ import division
+
 import random
 import json
 import socket
@@ -233,7 +235,9 @@ class Server:
 
                         self.retransmit_count = 0
                         if len(decoded_msg['data']) > 0:
+                            #logging.warning('Server seen seqnum: {}'.format(decoded_msg['seqnum']))
                             self.process_data_packet(decoded_msg)
+                            #logging.warning('Server has ACKd: {}'.format(self.ack_seq))
                             if self.send_sacks:
                                 self.send_packet(self.sack_packet(
                                     decoded_msg['seqnum'], decoded_msg['seqnum'] + len(decoded_msg['data'])
