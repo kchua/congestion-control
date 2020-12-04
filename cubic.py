@@ -49,7 +49,7 @@ SYN_RCVD = 4
 ESTABLISHED = 5
 
 
-class TCPClient:
+class TCPCUBICClient:
     def __init__(self, server, read_data):
         """
         Creates a client which will attempt to connect to
@@ -57,7 +57,11 @@ class TCPClient:
         server argument.
         """
 
-        self.algo = 'RENO'
+        self.algo = 'CUBIC'
+        self.C = 0.4
+        self.beta_cubic = 0.7
+        self.last_congestion_event = t.time()
+        self.Wmax = -1
 
         # Connection that will be initialized once.
         self.server = server  # Server identified with an (ip, port) pair.
@@ -210,9 +214,9 @@ class TCPClient:
                             if self.duplicate_acks == 3:
                                 if self.algo == 'RENO':
                                     # Reno has fast recovery
-                                    self.retransmit_packet(True, current_time)
+                                    self.retransmit_packet(True)
                                 else:
-                                    self.retransmit_packet(False, current_time)
+                                    self.retransmit_packet(False)
                         else:
                             self.duplicate_acks = 0
 
@@ -228,10 +232,22 @@ class TCPClient:
                                     logging.info('Congestion window updated to {}'.format(self.cwnd))
                                     logging.info('Retransmit timeout {}'.format(self.rto))
                                 else:
-                                    self.cwnd += 1.0 / self.cwnd
+                                    # Three phases of CUBIC: TCP-friendly, concave, convex
+                                    assert self.Wmax > 0
+                                    W_cubic = self.cubic_function(received_time)
+                                    W_est = self.est_windowsize(received_time)
+
+                                    if W_cubic < W_est:
+                                        # TCP-friendly phase
+                                        self.cwnd = W_est
+                                    else:
+                                        # Convex and Concave phase
+                                        self.cwnd += (self.cubic_function(received_time + self.srtt) - self.cwnd) / self.cwnd
 
                                 if self.cwnd > self.ssthresh:
                                     self.slow_start = False
+                                    if self.Wmax < 0:
+                                    	self.Wmax = self.cwnd
 
                                 if acked_infodict['retransmitted'] == 0:
                                     # Since this packet is not a retransmitted packet, use it to update srtt.
@@ -286,12 +302,21 @@ class TCPClient:
                 # Check if we should retransmit any existing packets.
                 current_time = t.time()
                 if current_time > self.rto + self.time_of_transmit:
-                    self.retransmit_packet(False, current_time)
+                    self.retransmit_packet(False)
 
             else:
                 logging.error('Incorrect TCP State.')
                 self.state = CLOSED
                 return
+
+    def cubic_function(self, current_time):
+    	elapsed_time = current_time - self.last_congestion_event
+    	K = (self.Wmax * (1 - self.beta_cubic) / self.C) ** (0.334)
+    	return self.C * (elapsed_time - K) ** 3 + self.Wmax
+
+    def est_windowsize(self, current_time):
+    	elapsed_time = current_time - self.last_congestion_event
+    	return self.Wmax * self.beta_cubic + (3 * (1 - self.beta_cubic) / (1 + self.beta_cubic)) * (elapsed_time / self.srtt)
 
     def retransmit_packet(self, fast_recovery, current_time):
         assert not self.packets_in_flight[0][1]['ACKed']
@@ -300,10 +325,14 @@ class TCPClient:
         self.send_packet(to_retransmit['packet'])
         logging.warn('Client RETRANSMITTING packet.')
         self.time_of_transmit = current_time
+        self.last_congestion_event = current_time
 
         if to_retransmit['retransmitted'] == 0:
-            # RFC5681 Equation (4)
-            self.ssthresh = max(len(self.packets_in_flight), 2)
+            # RFC8312
+            self.Wmax = self.cwnd
+            self.ssthresh = self.cwnd * self.beta_cubic
+            self.ssthresh = max(self.ssthresh, 2)
+            self.cwnd = self.cwnd * self.beta_cubic
 
         # Restart from small congestion window, update ssthresh, begin slow start.
         if fast_recovery:
@@ -329,6 +358,6 @@ if __name__ == '__main__':
     def read_garbage_data(num_chars):
         return ' ' * num_chars
 
-    client = TCPClient((options.ip, options.port), read_garbage_data)
+    client = TCPCUBICClient((options.ip, options.port), read_garbage_data)
     client.run()
     lipsum.close()
