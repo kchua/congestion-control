@@ -1,3 +1,5 @@
+from __future__ import division
+
 import socket
 import json
 import optparse
@@ -23,6 +25,7 @@ MAX_DATA_SIZE = 1400
 MAX_RETRANSMIT  = 50
 ALPHA = 0.9
 
+LATENCY_AWARE = True
 
 def create_packet(seqnum, acknum, data, rwnd, flags):
     return {
@@ -47,14 +50,14 @@ SYN_SENT = 3
 SYN_RCVD = 4
 ESTABLISHED = 5
 
-# Vivace state flags
+# Allegro state flags
 WAITING_FIRST_SRTT = -1
 SLOW_START = 0
 DECISION_STATE = 1
 RATE_ADJUSTING_STATE = 2
 WAITING_RESULTS = 3
 
-VIVACE_STATE = {
+ALLEGRO_STATE = {
     -1: "WAITING FOR FIRST SRTT",
     0 : "SLOW START",
     1 : "DECISION STATE",
@@ -62,10 +65,6 @@ VIVACE_STATE = {
     3 : "WAITING FOR MI GROUP RESULTS"
 }
 
-# Vivace constants
-VIVACE_EPS = 0.05
-BNDRY = 0.05
-BNDRY_STEP = 0.1
 
 class Client:
     def __init__(self, server, read_data):
@@ -98,7 +97,7 @@ class Client:
         self.time_since_transmit = 0.0
         self.time_to_retransmit = np.inf
 
-        self.vivace_state = WAITING_FIRST_SRTT
+        self.allegro_state = WAITING_FIRST_SRTT
         self.rct_ordering = (1, -1, 1, -1)
         self.rct_idx = 0  # Which MI of the randomized control trial are we on.
         self.decided_direction = 0
@@ -106,7 +105,7 @@ class Client:
         self.max_granularity = 0.05
         self.eps_delta = 0.01
 
-        self.vivace_cur_start_MI = None
+        self.allegro_cur_start_MI = None
         self.MI_info_list = []
         self.cur_rate = 1.0
         self.base_rate = 1.0
@@ -169,26 +168,30 @@ class Client:
         for i in range(true_idx):
             rtt = self.MI_info_list[i]['rtt']
             rate = self.MI_info_list[i]['rate']
+            past_srtts = np.array(self.MI_info_list[i-1]['packet_srtts'])
             srtts = np.array(self.MI_info_list[i]['packet_srtts'])
             acks = np.array(self.MI_info_list[i]['packet_acks'])
             times = np.array(self.MI_info_list[i]['times'])
 
             if len(srtts) == 0:
                 self.MI_info_list[i]['utility'] = rate ** 0.9
+                loss_rate = None
+                throughput = 0.0
+                rtt_now = 0.0
             else:
-                lost_packets = np.isinf(srtts)
-                srtts = srtts[np.logical_not(lost_packets)]
-                times = times[np.logical_not(lost_packets)]
-
+                rtt_now = np.mean(srtts[np.isfinite(srtts)])
+                rtt_before = np.mean(past_srtts[np.isfinite(past_srtts)])
                 loss_rate = float(len(acks) - np.count_nonzero(acks)) / float(len(acks))
-                if len(srtts) >= 2:
-                    mean_srtt, mean_time = np.mean(srtts), np.mean(times)
-                    srtt_devs, time_devs = srtts - mean_srtt, times - mean_time
-                    weights = time_devs / np.sum(time_devs ** 2)
-                    latency_change = np.sum(srtt_devs * weights)
+                throughput = rate * (1 - loss_rate)
+
+                alpha = 100
+                beta = 10
+                sigmoid_loss = 1.0 / (1.0 + np.exp(alpha * (loss_rate - 0.05)))
+                if LATENCY_AWARE and rtt_now > 0:
+                    sigmoid_latency = 1.0 / (1.0 + np.exp(beta * (rtt_before / rtt_now - 1)))
+                    self.MI_info_list[i]['utility'] = (throughput * sigmoid_loss * sigmoid_latency - rate * loss_rate) / rtt_now
                 else:
-                    latency_change = 0  # TODO: What is the appropriate value if all packets are lost?
-                self.MI_info_list[i]['utility'] = (rate ** 0.9) - (900 * rate * latency_change) - (11.35 * rate * loss_rate)
+                    self.MI_info_list[i]['utility'] = throughput * sigmoid_loss - rate * loss_rate
 
             self.past_MI_rates.append(rate)
             self.past_MI_utilities.append(self.MI_info_list[i]['utility'])
@@ -198,8 +201,9 @@ class Client:
             logging.debug("MI #{}".format(self.MI_info_list[i]['idx']))
             logging.debug("Packets sent: {}".format(len(acks)))
             logging.debug("Sending rate: {}".format(rate))
-            logging.debug("Latency change: {}".format(latency_change))
             logging.debug("Loss rate: {}".format(loss_rate))
+            logging.debug("RTT: {}".format(rtt_now))
+            logging.debug("Throughput: {}".format(throughput * MAX_DATA_SIZE))
             logging.debug("Utility: {}".format(self.MI_info_list[i]['utility']))
             logging.debug("########################################################\n")
         self.MI_info_list = self.MI_info_list[true_idx:]
@@ -386,10 +390,10 @@ class Client:
                 self.finalize_MIs_before(mntr_itval['idx'])
 
     def cc_update(self):
-        # Vivace monitor handling and rate control
+        # Allegro monitor handling and rate control
         if self.has_estimated_rtt and self.cur_MI is None:
-            self.vivace_state = SLOW_START
-        if self.vivace_state != WAITING_FIRST_SRTT:
+            self.allegro_state = SLOW_START
+        if self.allegro_state != WAITING_FIRST_SRTT:
             if self.cur_MI is None:
                 self.start_new_MI()
                 logging.debug("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
@@ -399,48 +403,32 @@ class Client:
                 logging.debug("Current RTT estimate: {}s.".format(self.cur_MI['rtt']))
                 logging.debug("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n")
             elif t.time() - self.cur_MI["start"] > 2.5 * self.cur_MI["rtt"]:
-                if self.vivace_state == SLOW_START:
+                if self.allegro_state == SLOW_START:
                     if len(self.past_MI_utilities) >= 2 and self.past_MI_utilities[-1] < self.past_MI_utilities[-2]:
                         self.cur_rate = self.past_MI_rates[-2]
                         self.base_rate = self.cur_rate
-                        self.vivace_state = DECISION_STATE
+                        self.allegro_state = DECISION_STATE
                         self.rct_idx = 0
-                        self.vivace_cur_start_MI = self.cur_MI['idx'] + 1
+                        self.allegro_cur_start_MI = self.cur_MI['idx'] + 1
                         logging.debug("Exiting out of slow start phase.")
                     else:
                         self.cur_rate *= 2.0
-                        """
-                        DECISION_STATE = 1
-                        RATE_ADJUSTING_STATE = 2
-                        WAITING_RESULTS = 3
-
-                        self.vivace_state = WAITING_FIRST_SRTT
-                        self.rct_ordering = (1, -1, 1, -1)
-                        self.rct_idx = 0  # Which MI of the randomized control trial are we on.
-                        self.decided_direction = 0
-                        self.experiment_granularity = 0.01
-                        self.eps_delta = 0.01
-
-                        """
-                elif self.vivace_state == DECISION_STATE:
+                elif self.allegro_state == DECISION_STATE:
                     if self.rct_idx == 0:
                         # Initialize randomized control trial
                         phase1 = random.randint(0, 1) * 2 - 1
                         phase2 = random.randint(0, 1) * 2 - 1
                         self.rct_ordering = (phase1, phase1 * -1, phase2, phase2 * -1)
 
-                    logging.debug('RCT_IDX IS: {}'.format(self.rct_idx))
-                    logging.debug('TUPLE SIZE IS: {}'.format(len(self.rct_ordering)))
                     self.cur_rate = (1.0 + self.rct_ordering[self.rct_idx] * self.experiment_granularity) * self.base_rate
                     self.rct_idx += 1
-                    logging.debug('RCT_IDX UPDATED TO: {}'.format(self.rct_idx))
 
                     if self.rct_idx == 4:
-                        self.vivace_state = WAITING_RESULTS
-                elif self.vivace_state == WAITING_RESULTS:
+                        self.allegro_state = WAITING_RESULTS
+                elif self.allegro_state == WAITING_RESULTS:
                     self.cur_rate = self.base_rate  # Set back to base rate since the experiment is over.
-                    if len(self.past_MI_utilities) > self.vivace_cur_start_MI + 5:   # Once we get results
-                        idx = self.vivace_cur_start_MI
+                    if len(self.past_MI_utilities) > self.allegro_cur_start_MI + 5:   # Once we get results
+                        idx = self.allegro_cur_start_MI
 
                         # Phase 1 result
                         if self.past_MI_utilities[idx + 1] > self.past_MI_utilities[idx + 2]:
@@ -458,24 +446,24 @@ class Client:
                         logging.debug('RCT Ordering was: {}'.format(self.rct_ordering))
                         if phase1_winner == phase2_winner:
                             # Unanimous. Choose this rate and move on to rate adjusting state.
-                            logging.debug("Decided on direction {}.")
+                            logging.debug("Decided on direction {}.".format(phase1_winner))
                             self.decided_direction = phase1_winner
                             self.speed_to_increase = 1
                             self.base_rate = (1.0 + self.decided_direction * self.experiment_granularity) * self.base_rate
                             self.cur_rate = self.base_rate
                             self.experiment_granularity = self.eps_delta
                             self.rct_idx = 0
-                            self.vivace_state = RATE_ADJUSTING_STATE
-                            self.vivace_cur_start_MI = self.cur_MI['idx'] + 1
+                            self.allegro_state = RATE_ADJUSTING_STATE
+                            self.allegro_cur_start_MI = self.cur_MI['idx'] + 1
                         else:
                             logging.debug("Ambiguous result. Retrying decision state.")
                             # Try a higher granularity and retry decision state.
                             self.experiment_granularity += self.eps_delta
                             self.experiment_granularity = min(self.experiment_granularity, self.max_granularity)
                             self.rct_idx = 0
-                            self.vivace_state = DECISION_STATE
-                            self.vivace_cur_start_MI = self.cur_MI['idx'] + 1
-                elif self.vivace_state == RATE_ADJUSTING_STATE:
+                            self.allegro_state = DECISION_STATE
+                            self.allegro_cur_start_MI = self.cur_MI['idx'] + 1
+                elif self.allegro_state == RATE_ADJUSTING_STATE:
                     # Try increasing. Then check if we should revert to a previous rate.
                     logging.debug("In Rate Adjusting State. Will try to change base rate by {}".format(self.speed_to_increase * self.decided_direction * self.experiment_granularity))
                     self.base_rate = (1.0 + self.speed_to_increase * self.decided_direction * self.experiment_granularity) * self.base_rate
@@ -483,8 +471,8 @@ class Client:
                     self.speed_to_increase += 1
 
                     # If we have information available from past MIs, use it.
-                    if len(self.past_MI_utilities) > self.vivace_cur_start_MI + 3:
-                        idx = self.vivace_cur_start_MI
+                    if len(self.past_MI_utilities) > self.allegro_cur_start_MI + 3:
+                        idx = self.allegro_cur_start_MI
                         for i in range(idx+1, len(self.past_MI_utilities)-1):
                             if self.past_MI_utilities[i] > self.past_MI_utilities[i+1]:
                                 # Utility has decreased. Revert the rate and move back to decision making.
@@ -492,8 +480,8 @@ class Client:
                                 self.base_rate = self.past_MI_rates[i]
                                 self.cur_rate = self.base_rate
                                 self.rct_idx = 0
-                                self.vivace_cur_start_MI = self.cur_MI['idx'] + 1
-                                self.vivace_state = DECISION_STATE
+                                self.allegro_cur_start_MI = self.cur_MI['idx'] + 1
+                                self.allegro_state = DECISION_STATE
 
                 self.start_new_MI()
                 logging.debug("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
@@ -503,15 +491,15 @@ class Client:
                 logging.debug("Current RTT estimate: {}s.".format(self.cur_MI['rtt']))
                 logging.debug("Current RTO: {}s.".format(self.cur_MI['rtt']))
 
-                if self.vivace_state != SLOW_START:
+                if self.allegro_state != SLOW_START:
                     logging.debug("")
-                    logging.debug("MI is part of experiment group that started with MI #{}.".format(self.vivace_cur_start_MI))
-                    logging.debug("Current state: {}".format(VIVACE_STATE[self.vivace_state]))
+                    logging.debug("MI is part of experiment group that started with MI #{}.".format(self.allegro_cur_start_MI))
+                    logging.debug("Current state: {}".format(ALLEGRO_STATE[self.allegro_state]))
                     logging.debug("Experiment group base rate: {}".format(self.base_rate))
                 logging.debug("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n")
 
     def on_send(self, infodict, time_sent):
-        if self.vivace_state != WAITING_FIRST_SRTT and not infodict['retransmitted']:
+        if self.allegro_state != WAITING_FIRST_SRTT and not infodict['retransmitted']:
             infodict.update({
                 'MI': self.cur_MI,
                 'MI_idx': len(self.cur_MI['packet_srtts'])
