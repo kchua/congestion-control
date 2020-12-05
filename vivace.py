@@ -326,6 +326,10 @@ class Client:
                         if t.time() > self.time_to_retransmit:
                             infodict = self.packets_in_flight[0][1]
                             infodict['retransmitted'] = True
+
+                            infodict.pop('MI', None)      # Assume packet is lost if it was retransmitted.
+                            infodict.pop('MI_idx', None)  # Will ignore during monitoring.
+
                             self.rto *= 2.0
                             self.time_to_retransmit = np.inf
                             logging.debug('Retransmitting packet with sequence number {}'.format(
@@ -453,7 +457,7 @@ class Client:
                 logging.debug("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n")
 
     def on_send(self, infodict, time_sent):
-        if self.vivace_state != WAITING_FIRST_SRTT:
+        if self.vivace_state != WAITING_FIRST_SRTT and not infodict['retransmitted']:
             infodict.update({
                 'MI': self.cur_MI,
                 'MI_idx': len(self.cur_MI['packet_srtts'])
