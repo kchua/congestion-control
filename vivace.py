@@ -5,6 +5,7 @@ import select
 import random
 import time as t
 import heapq
+import random
 
 import numpy as np
 import logging
@@ -105,11 +106,13 @@ class Client:
         self.MI_info_list = []
         self.cur_rate = 1.0
         self.base_rate = 1.0
+        self.grad_multiplier = 1.0
         self.times_exceeded_boundary = 0
         self.num_same_sign_steps = 0
 
         self.past_MI_utilities = []
         self.past_MI_rates = []
+        self.past_num_packets_sent = []
 
     def syn_packet(self):
         return create_packet(self.our_seq, 0, "", 0, IS_SYN | SACK_PERMITTED)
@@ -159,6 +162,7 @@ class Client:
         true_idx = idx - self.MI_info_list[0]['idx']
         if true_idx < 0:
             logging.debug("Monitor interval flushed before SACK arrived.")
+            return
         if true_idx > len(self.MI_info_list):
             raise IndexError("Invalid index.")
         for i in range(true_idx):
@@ -179,24 +183,36 @@ class Client:
                 if len(srtts) >= 2:
                     mean_srtt, mean_time = np.mean(srtts), np.mean(times)
                     srtt_devs, time_devs = srtts - mean_srtt, times - mean_time
-                    weights = time_devs / np.sum(time_devs ** 2)
+                    weights = time_devs / np.sum(time_devs ** 2.0)
                     latency_change = np.sum(srtt_devs * weights)
+                    if np.abs(latency_change) < 0.01:
+                        latency_change = 0.0
+                    self.MI_info_list[i]['utility'] = (rate ** 0.9) - (900.0 * rate * latency_change) - (11.35 * rate * loss_rate)
+
+                    logging.debug("########################################################")
+                    logging.debug("New MI reported.")
+                    logging.debug("MI #{}".format(self.MI_info_list[i]['idx']))
+                    logging.debug("Packets sent: {}".format(len(acks)))
+                    logging.debug("Sending rate: {}".format(rate))
+                    logging.debug("Latency change: {}".format(latency_change))
+                    logging.debug("Loss rate: {}".format(loss_rate))
+                    logging.debug("Utility: {}".format(self.MI_info_list[i]['utility']))
+                    logging.debug("########################################################\n")
                 else:
-                    latency_change = 0  # TODO: What is the appropriate value if all packets are lost?
-                self.MI_info_list[i]['utility'] = (rate ** 0.9) - (900 * rate * latency_change) - (11.35 * rate * loss_rate)
+                    self.MI_info_list[i]['utility'] = self.past_MI_utilities[-1]
+
+                    logging.debug("########################################################")
+                    logging.debug("New MI reported.")
+                    logging.debug("MI #{}".format(self.MI_info_list[i]['idx']))
+                    logging.debug("Packets sent: {}".format(len(acks)))
+                    logging.debug("Sending rate: {}".format(rate))
+                    logging.debug("Utility: {}".format(self.MI_info_list[i]['utility']))
+                    logging.debug("########################################################\n")
 
             self.past_MI_rates.append(rate)
             self.past_MI_utilities.append(self.MI_info_list[i]['utility'])
+            self.past_num_packets_sent.append(len(self.MI_info_list[i]['packet_acks']))
 
-            logging.debug("########################################################")
-            logging.debug("New MI reported.")
-            logging.debug("MI #{}".format(self.MI_info_list[i]['idx']))
-            logging.debug("Packets sent: {}".format(len(acks)))
-            logging.debug("Sending rate: {}".format(rate))
-            logging.debug("Latency change: {}".format(latency_change))
-            logging.debug("Loss rate: {}".format(loss_rate))
-            logging.debug("Utility: {}".format(self.MI_info_list[i]['utility']))
-            logging.debug("########################################################\n")
         self.MI_info_list = self.MI_info_list[true_idx:]
 
     def run(self):
@@ -323,20 +339,22 @@ class Client:
                     infodict = None
 
                     if len(self.packets_in_flight) > 0:
-                        if t.time() > self.time_to_retransmit:
+                        if t.time() > self.time_to_retransmit or \
+                            (not self.packets_in_flight[0][1]['retransmitted'] and
+                                self.packets_in_flight[0][1].has_key('MI') and
+                                not np.isinf(self.packets_in_flight[0][1]['MI']['utility'])):
                             infodict = self.packets_in_flight[0][1]
                             infodict['retransmitted'] = True
-                            self.rto *= 2.0
-                            self.time_to_retransmit = np.inf
                             logging.debug('Retransmitting packet with sequence number {}'.format(
                                 infodict['packet']['seqnum'])
                             )
+                            self.time_to_retransmit = np.inf
                             logging.debug('Current RTO value: {}'.format(self.rto))
                     else:
                         self.time_to_retransmit = np.inf
 
                     # No packets to retransmit this time, send a new one if possible.
-                    if infodict is None:
+                    if infodict is None and len(self.packets_in_flight) < 1000:
                         data = self.read_data(MAX_DATA_SIZE)
                         if len(data) > 0:
                             packet = create_packet(self.our_seq + 1, self.ack_seq + 1, data, 0, IS_ACK)
@@ -362,6 +380,8 @@ class Client:
                         self.on_send(infodict, self.time_since_transmit)
                         if np.isinf(self.time_to_retransmit):
                             self.time_to_retransmit = t.time() + self.rto
+                        if infodict['retransmitted']:
+                            self.rto *= 2.0
 
             else:
                 logging.error('Incorrect TCP State.')
@@ -373,8 +393,10 @@ class Client:
             mntr_itval, itval_idx = infodict['MI'], infodict['MI_idx']
             mntr_itval['packet_acks'][itval_idx] = True
             if is_SACK:
-                mntr_itval['packet_srtts'][itval_idx] = received - infodict['timestamp']
-                self.finalize_MIs_before(mntr_itval['idx'])
+                if not infodict['retransmitted']:
+                    mntr_itval['packet_srtts'][itval_idx] = received - infodict['timestamp']
+                    if mntr_itval['idx'] >= 0:
+                        self.finalize_MIs_before(mntr_itval['idx'])
 
     def cc_update(self):
         # Vivace monitor handling and rate control
@@ -400,27 +422,45 @@ class Client:
                     else:
                         self.cur_rate *= 2.0
                 elif self.vivace_state == USING_BASE_RATE:                # Switch to testing r(1 + e)
-                    self.cur_rate = (1.0 + VIVACE_EPS) * self.base_rate
-                    self.vivace_state = TESTING_HIGHER
+                    if random.randrange(2):
+                        self.cur_rate = (1.0 + VIVACE_EPS) * self.base_rate
+                        self.vivace_state = TESTING_HIGHER
+                    else:
+                        self.cur_rate = (1.0 - VIVACE_EPS) * self.base_rate
+                        self.vivace_state = TESTING_LOWER
                 elif self.vivace_state == TESTING_HIGHER:
-                    self.cur_rate = (1.0 - VIVACE_EPS) * self.base_rate      # Switch to testing r(1 - e)
-                    self.vivace_state = TESTING_LOWER
+                    if self.cur_MI['idx'] == self.vivace_cur_start_MI + 1:
+                        self.cur_rate = (1.0 - VIVACE_EPS) * self.base_rate      # Switch to testing r(1 - e)
+                        self.vivace_state = TESTING_LOWER
+                    else:
+                        self.cur_rate = self.base_rate                        # Reset to base rate until we get results.
+                        self.vivace_state = WAITING_RESULTS
+                        self.grad_multiplier = -1.0
                 elif self.vivace_state == TESTING_LOWER:
-                    self.cur_rate = self.base_rate                        # Reset to base rate until we get results.
-                    self.vivace_state = WAITING_RESULTS
+                    if self.cur_MI['idx'] == self.vivace_cur_start_MI + 1:
+                        self.cur_rate = (1.0 + VIVACE_EPS) * self.base_rate      # Switch to testing r(1 - e)
+                        self.vivace_state = TESTING_HIGHER
+                    else:
+                        self.cur_rate = self.base_rate                        # Reset to base rate until we get results.
+                        self.vivace_state = WAITING_RESULTS
+                        self.grad_multiplier = 1.0
                 elif self.vivace_state == WAITING_RESULTS:
-                    if len(self.past_MI_utilities) > self.vivace_cur_start_MI + 3:   # Once we get results
+                    if len(self.past_MI_utilities) > self.vivace_cur_start_MI + 2:   # Once we get results
                         idx = self.vivace_cur_start_MI
-                        util_diff = (self.past_MI_utilities[idx + 1] - self.past_MI_utilities[idx + 2])
+                        if self.past_num_packets_sent[idx + 1] == 0 or self.past_num_packets_sent[idx + 2] == 0:
+                            self.vivace_cur_start_MI = self.cur_MI['idx']
+                            self.cur_rate = (1.0 + VIVACE_EPS) * self.base_rate
+                            self.vivace_state = TESTING_HIGHER
+                        util_diff = self.grad_multiplier * (self.past_MI_utilities[idx + 1] - self.past_MI_utilities[idx + 2])
                         est_grad = util_diff / (2 * VIVACE_EPS * self.base_rate)
 
                         # Compute step size and gradient step
-                        if est_grad * self.num_same_sign_steps < 0:
-                            self.num_same_sign_steps = 0
-                            self.times_exceeded_boundary = 0
-                        step_size = np.maximum(1, np.maximum(self.num_same_sign_steps, 2 * self.num_same_sign_steps - 3))
+                        if est_grad * self.num_same_sign_steps < 0.0:
+                            self.num_same_sign_steps = 0.0
+                            self.times_exceeded_boundary = 0.0
+                        step_size = np.maximum(1.0, np.maximum(self.num_same_sign_steps, 2.0 * self.num_same_sign_steps - 3.0))
                         grad_step = est_grad * step_size
-                        self.num_same_sign_steps += int(np.sign(grad_step))
+                        self.num_same_sign_steps += np.sign(grad_step)
 
                         # Compute bound on grad step
                         boundary = self.base_rate * (BNDRY + self.times_exceeded_boundary * BNDRY_STEP)
@@ -432,7 +472,7 @@ class Client:
                             self.times_exceeded_boundary = int(((np.abs(grad_step) / self.base_rate) - BNDRY) / BNDRY_STEP) + 1
                         print(grad_step)
 
-                        self.base_rate = self.base_rate + grad_step                                # Compute a new base rate
+                        self.base_rate = np.maximum(self.base_rate + grad_step, 10.0 / self.estimated_rtt)                                # Compute a new base rate
                         self.cur_rate = self.base_rate
                         self.vivace_state = USING_BASE_RATE
                         self.vivace_cur_start_MI = self.cur_MI['idx'] + 1
@@ -443,7 +483,7 @@ class Client:
                 logging.debug("MI #{}".format(self.cur_MI['idx']))
                 logging.debug("Sending rate: {}".format(self.cur_MI['rate']))
                 logging.debug("Current RTT estimate: {}s.".format(self.cur_MI['rtt']))
-                logging.debug("Current RTO: {}s.".format(self.cur_MI['rtt']))
+                logging.debug("Current RTO: {}s.".format(self.rto))
 
                 if self.vivace_state != SLOW_START:
                     logging.debug("")
@@ -481,6 +521,6 @@ if __name__ == '__main__':
     def read_garbage_data(num_chars):
         return ' ' * num_chars
 
-    client = Client((options.ip, options.port), read_data)
+    client = Client((options.ip, options.port), read_garbage_data)
     client.run()
     lipsum.close()
