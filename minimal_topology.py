@@ -52,14 +52,15 @@ def main():
 
     h2 = net.get('h2')
     client_log = open("client.log", "w")
-    p2 = h2.popen('python client.py -i %s' % h1.IP(), stdout=client_log, stderr=client_log)
+    p2 = h2.popen('python allegro.py -i %s' % h1.IP(), stdout=client_log, stderr=client_log)
 
-    time.sleep(10)
-    link = h2.connectionsTo(net.get('s1'))[0]
-    link[0].config(delay='50ms')
-    link[1].config(delay='50ms')
-    time.sleep(20)
+    #time.sleep(10)
+    #link = h2.connectionsTo(net.get('s1'))[0]
+    #link[0].config(delay='50ms')
+    #link[1].config(delay='50ms')
+    #time.sleep(20)
 
+    CLI(net)
     p1.terminate()
     p2.terminate()
     net.stop()
