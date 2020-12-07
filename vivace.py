@@ -71,7 +71,7 @@ BNDRY = 0.05
 BNDRY_STEP = 0.1
 
 class Client:
-    def __init__(self, server, read_data):
+    def __init__(self, server, read_data, logfile=None):
         """
         Creates a client which will attempt to connect to
         the server determined by the (ip, port) tuple in the
@@ -114,6 +114,11 @@ class Client:
         self.past_MI_rates = []
         self.past_num_packets_sent = []
 
+        self.logfile = logfile
+        self.total_packets_sent = 0
+        self.time_start = 0
+        self.time_last_logged = 0
+
     def syn_packet(self):
         return create_packet(self.our_seq, 0, "", 0, IS_SYN | SACK_PERMITTED)
 
@@ -125,6 +130,7 @@ class Client:
             json.dumps(packet).encode(),
             self.server
         )
+        self.total_packets_sent += 1
 
     def update_rtt(self, srtt):
         if self.has_estimated_rtt:
@@ -264,6 +270,8 @@ class Client:
 
                                 self.send_packet(self.ack_packet())
                                 self.state = ESTABLISHED
+                                self.time_start = t.time()
+                                self.time_last_logged = t.time()
                                 logging.info('Connection established for Client.')
 
                                 self.time_since_transmit = 0.0
@@ -284,6 +292,15 @@ class Client:
                 pass
             elif self.state == ESTABLISHED:
                 # Check if we have any new ACKs
+                if t.time() - self.time_last_logged > 1:
+                    if self.logfile is not None:
+                        with open(self.logfile, 'w') as log:
+                            json.dump({
+                                'time_since_start': t.time() - self.time_start,
+                                'total_packets': self.total_packets_sent
+                            }, log)
+                    self.time_last_logged = t.time()
+
                 while True:
                     try:
                         msg, addr = self.sock.recvfrom(1600)
@@ -349,10 +366,10 @@ class Client:
                             infodict.pop('MI', None)      # Assume packet is lost if it was retransmitted.
                             infodict.pop('MI_idx', None)  # Will ignore during monitoring.
 
+                            self.time_to_retransmit = np.inf
                             logging.debug('Retransmitting packet with sequence number {}'.format(
                                 infodict['packet']['seqnum'])
                             )
-                            self.time_to_retransmit = np.inf
                             logging.debug('Current RTO value: {}'.format(self.rto))
                     else:
                         self.time_to_retransmit = np.inf
@@ -515,6 +532,7 @@ if __name__ == '__main__':
     parser = optparse.OptionParser()
     parser.add_option('-i', dest='ip', default='127.0.0.1')
     parser.add_option('-p', dest='port', type='int', default=12345)
+    parser.add_option('-l', dest='logfile', default=None)
     (options, args) = parser.parse_args()
 
     lipsum = open('lipsum.txt', 'r')
@@ -525,6 +543,6 @@ if __name__ == '__main__':
     def read_garbage_data(num_chars):
         return ' ' * num_chars
 
-    client = Client((options.ip, options.port), read_garbage_data)
+    client = Client((options.ip, options.port), read_garbage_data, options.logfile)
     client.run()
     lipsum.close()

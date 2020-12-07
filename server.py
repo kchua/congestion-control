@@ -54,7 +54,7 @@ ESTABLISHED = 5
 
 
 class Server:
-    def __init__(self, address, process_message):
+    def __init__(self, address, process_message, logfile=None):
         """
         Creates a server.
         """
@@ -64,6 +64,7 @@ class Server:
         self.poller = select.poll()
         self.poller.register(self.sock, ALL_FLAGS)
         self.process_message = process_message
+        self.logfile = logfile
 
         self.recv_buffer_size = 1000000
 
@@ -82,6 +83,9 @@ class Server:
         self.last_time_measured = t.time()
         self.measure_intervals = 1.0
 
+        self.total_packets_acked = 0
+        self.time_start = 0
+
     def send_packet(self, packet):
         data = json.dumps(packet).encode()
         logging.info('Sending packet with data size: {}'.format(len(data)))
@@ -94,6 +98,13 @@ class Server:
             logging.error('Unable to send packet.')
 
     def process_data_packet(self, p):
+        newly_ACKed_segments = 0
+        start = t.time()
+
+        end_seq = self._end_seqnum(p)
+        p['end_seqnum'] = end_seq
+        del p['data']
+
         if Server._end_seqnum(p) >= self.ack_seq + 1:
             heapq.heappush(self.packet_buffer, (p['seqnum'], p))
 
@@ -103,10 +114,18 @@ class Server:
                 elif self.packet_buffer[0][1]['seqnum'] <= self.ack_seq + 1:
                     packet = heapq.heappop(self.packet_buffer)[1]
                     difference = self.ack_seq + 1 - packet['seqnum']
-                    self.process_message(packet['data'][difference:])
+                    self.process_message(self._end_seqnum(packet) - packet['seqnum'] + 1)
+                    # self.process_message(packet['data'])
                     self.ack_seq = Server._end_seqnum(packet)
+                    newly_ACKed_segments += 1
                 else:
                     break
+        end = t.time()
+        self.total_packets_acked += newly_ACKed_segments
+        if newly_ACKed_segments > 1:
+            logging.warning('Total newly ACKed segments: {} segments'.format(newly_ACKed_segments))
+            logging.warning('ACKing required {}s'.format(end - start))
+            logging.warning('Total queue length: {} segments'.format(len(self.packet_buffer)))
 
     def syn_packet(self):
         return create_packet(self.our_seq, 0, "", 0, IS_SYN)
@@ -180,6 +199,7 @@ class Server:
                                 logging.info('Received ACK for Server Seq {}'.format(self.our_seq))
 
                                 self.state = ESTABLISHED
+                                self.time_start = t.time()
                                 logging.info('Connection established for Server.')
 
                                 # Check if there is data in the ACK.
@@ -187,7 +207,7 @@ class Server:
                                     self.process_data_packet(decoded_msg)
                                     if self.send_sacks:
                                         self.send_packet(self.sack_packet(
-                                            decoded_msg['seqnum'], decoded_msg['seqnum'] + len(decoded_msg['data'])
+                                            decoded_msg['seqnum'], decoded_msg['end_seqnum'] + 1
                                         ))
                                     else:
                                         self.send_packet(self.ack_packet())
@@ -209,6 +229,12 @@ class Server:
                 current_time = t.time()
                 if current_time > self.last_time_measured + self.measure_intervals:
                     self.compute_measurements()
+                    if self.logfile is not None:
+                        with open(self.logfile, 'w') as log:
+                            json.dump({
+                                'time_since_start': current_time - self.time_start,
+                                'total_packets': self.total_packets_acked
+                            }, log)
 
                 events = self.poller.poll(1000)  # Poll for one second
 
@@ -240,7 +266,7 @@ class Server:
                             #logging.warning('Server has ACKd: {}'.format(self.ack_seq))
                             if self.send_sacks:
                                 self.send_packet(self.sack_packet(
-                                    decoded_msg['seqnum'], decoded_msg['seqnum'] + len(decoded_msg['data'])
+                                    decoded_msg['seqnum'], decoded_msg['end_seqnum'] + 1
                                 ))
                             else:
                                 self.send_packet(self.ack_packet())
@@ -266,6 +292,8 @@ class Server:
 
     @staticmethod
     def _end_seqnum(packet):
+        if packet.has_key('end_seqnum'):
+            return packet['end_seqnum']
         return packet['seqnum'] + len(packet['data']) - 1
 
 def test_process_data_packet(server):
@@ -280,6 +308,7 @@ if __name__ == '__main__':
     parser = optparse.OptionParser()
     parser.add_option('-i', dest='ip', default='')
     parser.add_option('-p', dest='port', type='int', default=12345)
+    parser.add_option('-l', dest='logfile', default=None)
     (options, args) = parser.parse_args()
 
     lipsum = open('lipsum_server.txt', 'w')
@@ -290,6 +319,9 @@ if __name__ == '__main__':
     def process_garbage_message(message):
         logging.info('Message received with size {}'.format(len(message)))
 
-    server = Server((options.ip, options.port), process_garbage_message)
+    def process_garbage_message_v2(num_bytes):
+        logging.info('Message received with size {}'.format(num_bytes))
+
+    server = Server((options.ip, options.port), process_garbage_message_v2, options.logfile)
     server.run()
     lipsum.close()

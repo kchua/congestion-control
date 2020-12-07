@@ -50,7 +50,7 @@ ESTABLISHED = 5
 
 
 class TCPClient:
-    def __init__(self, server, read_data):
+    def __init__(self, server, read_data, logfile=None):
         """
         Creates a client which will attempt to connect to
         the server determined by the (ip, port) tuple in the
@@ -96,6 +96,11 @@ class TCPClient:
         self.duplicate_acks = 0
         self.time_of_transmit = 0.0
 
+        self.logfile = logfile
+        self.total_packets_sent = 0
+        self.time_start = 0
+        self.time_last_logged = 0
+
     def syn_packet(self):
         return create_packet(self.our_seq, 0, "", 0, IS_SYN)
 
@@ -121,6 +126,7 @@ class TCPClient:
                 data,
                 self.server
             )
+            self.total_packets_sent += 1
         except:
             logging.error('Unable to send packet.')
 
@@ -172,6 +178,8 @@ class TCPClient:
 
                                 self.send_packet(self.ack_packet())
                                 self.state = ESTABLISHED
+                                self.time_start = t.time()
+                                self.time_last_logged = t.time()
                                 logging.warning('Connection established for Client.')
 
 
@@ -192,6 +200,15 @@ class TCPClient:
             elif self.state == SYN_RCVD:
                 pass
             elif self.state == ESTABLISHED:
+                if t.time() - self.time_last_logged > 1:
+                    if self.logfile is not None:
+                        with open(self.logfile, 'w') as log:
+                            json.dump({
+                                'time_since_start': t.time() - self.time_start,
+                                'total_packets': self.total_packets_sent
+                            }, log)
+                    self.time_last_logged = t.time()
+
                 current_time = t.time()
                 if current_time > self.last_time_measured + self.measure_intervals:
                     self.compute_measurements()
@@ -319,6 +336,7 @@ if __name__ == '__main__':
     parser = optparse.OptionParser()
     parser.add_option('-i', dest='ip', default='127.0.0.1')
     parser.add_option('-p', dest='port', type='int', default=12345)
+    parser.add_option('-l', dest='logfile', default=None)
     (options, args) = parser.parse_args()
 
     lipsum = open('lipsum.txt', 'r')
@@ -329,6 +347,6 @@ if __name__ == '__main__':
     def read_garbage_data(num_chars):
         return ' ' * num_chars
 
-    client = TCPClient((options.ip, options.port), read_garbage_data)
+    client = TCPClient((options.ip, options.port), read_garbage_data, options.logfile)
     client.run()
     lipsum.close()
