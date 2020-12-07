@@ -214,9 +214,9 @@ class TCPCUBICClient:
                             if self.duplicate_acks == 3:
                                 if self.algo == 'RENO':
                                     # Reno has fast recovery
-                                    self.retransmit_packet(True)
+                                    self.retransmit_packet(True, current_time)
                                 else:
-                                    self.retransmit_packet(False)
+                                    self.retransmit_packet(False, current_time)
                         else:
                             self.duplicate_acks = 0
 
@@ -302,7 +302,7 @@ class TCPCUBICClient:
                 # Check if we should retransmit any existing packets.
                 current_time = t.time()
                 if current_time > self.rto + self.time_of_transmit:
-                    self.retransmit_packet(False)
+                    self.retransmit_packet(False, current_time)
 
             else:
                 logging.error('Incorrect TCP State.')
