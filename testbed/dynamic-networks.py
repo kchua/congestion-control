@@ -78,7 +78,7 @@ def main(ntrials):
 
             start_time = time.time()
 
-            while time.time() < start_time + 30:
+            while time.time() < start_time + (5 * 60):
                 time.sleep(5)
                 new_params = generate_random_tc_params()
                 dynamic_link[0].config(**new_params)

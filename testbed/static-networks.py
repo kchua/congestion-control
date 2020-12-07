@@ -70,9 +70,9 @@ def main(topology, ntrials):
     if topology == "random_loss_resilience":
         variants = [1, 2, 3, 4, 5]
     elif topology == "satellite_link":
-        variants = [25, 50, 75, 100]
+        variants = [25, 50, 75, 100, 125]
     elif topology == "bufferbloat":
-        variants = [5, 10, 15, 20, 25, 30, 35, 40]
+        variants = [5, 10, 15, 20, 25]
     else:
         raise ValueError("Invalid topology.")
 
@@ -116,7 +116,7 @@ def main(topology, ntrials):
                     stdout=client_log, stderr=client_log
                 )
 
-                time.sleep(10)
+                time.sleep(3 * 60)
 
                 p1.terminate()
                 p2.terminate()
