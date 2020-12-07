@@ -91,7 +91,7 @@ class TCPClient:
         # Congestion control
         self.cwnd = 3  # Initial window set to 3 packets.
         self.ssthresh = 1000  # Initially set to arbitrarily high.
-        self.rwnd = 200  # Manually set to not overwhelm receiver.
+        self.rwnd = 1000  # Manually set to not overwhelm receiver.
         self.slow_start = True
         self.duplicate_acks = 0
         self.time_of_transmit = 0.0

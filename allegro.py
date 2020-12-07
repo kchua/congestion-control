@@ -163,6 +163,7 @@ class Client:
         true_idx = idx - self.MI_info_list[0]['idx']
         if true_idx < 0:
             logging.debug("Monitor interval flushed before SACK arrived.")
+            return
         if true_idx > len(self.MI_info_list):
             raise IndexError("Invalid index.")
         for i in range(true_idx):
@@ -332,14 +333,16 @@ class Client:
                     infodict = None
 
                     if len(self.packets_in_flight) > 0:
-                        if t.time() > self.time_to_retransmit:
+                        if t.time() > self.time_to_retransmit or \
+                            (not self.packets_in_flight[0][1]['retransmitted'] and
+                                self.packets_in_flight[0][1].has_key('MI') and
+                                not np.isinf(self.packets_in_flight[0][1]['MI']['utility'])):
                             infodict = self.packets_in_flight[0][1]
                             infodict['retransmitted'] = True
 
                             infodict.pop('MI', None)      # Assume packet is lost if it was retransmitted.
                             infodict.pop('MI_idx', None)  # Will ignore during monitoring.
 
-                            self.rto *= 2.0
                             self.time_to_retransmit = np.inf
                             logging.debug('Retransmitting packet with sequence number {}'.format(
                                 infodict['packet']['seqnum'])
@@ -349,7 +352,7 @@ class Client:
                         self.time_to_retransmit = np.inf
 
                     # No packets to retransmit this time, send a new one if possible.
-                    if infodict is None:
+                    if infodict is None and len(self.packets_in_flight) < 1000:
                         data = self.read_data(MAX_DATA_SIZE)
                         if len(data) > 0:
                             packet = create_packet(self.our_seq + 1, self.ack_seq + 1, data, 0, IS_ACK)
@@ -375,6 +378,8 @@ class Client:
                         self.on_send(infodict, self.time_since_transmit)
                         if np.isinf(self.time_to_retransmit):
                             self.time_to_retransmit = t.time() + self.rto
+                        if infodict['retransmitted']:
+                            self.rto *= 2.0
 
             else:
                 logging.error('Incorrect TCP State.')
